@@ -1,0 +1,28 @@
+{
+  "include": ["source", "scripts"],
+  "exclude": [
+    "**/__pycache__",
+    "**/_isaac_sim",
+    "**/docs",
+    "**/logs",
+    ".git",
+    ".vscode"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "source",
+        "source/inverted_pendulum",
+        "/home/jun/mycode_py/isaaclab/IsaacLab/source/isaaclab",
+        "/home/jun/mycode_py/isaaclab/IsaacLab/source/isaaclab_assets",
+        "/home/jun/mycode_py/isaaclab/IsaacLab/source/isaaclab_tasks",
+        "/home/jun/mycode_py/isaaclab/IsaacLab/source/isaaclab_rl",
+        "/home/jun/mycode_py/isaaclab/IsaacLab/source/isaaclab_mimic"
+      ]
+    }
+  ]
+}

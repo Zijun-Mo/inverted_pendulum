@@ -115,6 +115,20 @@ pythonVersion = "3.11"
 pythonPlatform = "Linux"
 enableTypeIgnoreComments = true
 
+extraPaths = [
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python3.11",
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python3.11/lib-dynload",
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python3.11/site-packages",
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python3.11/site-packages/cmeel.prefix/lib/python3.11/site-packages",
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python3.11/site-packages/isaacsim/exts/isaacsim.simulation_app",
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python3.11/site-packages/isaacsim/exts/isaacsim.simulation_app/isaacsim",
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python3.11/site-packages/isaacsim/extsDeprecated/omni.isaac.kit",
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python3.11/site-packages/isaacsim/kit",
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python3.11/site-packages/isaacsim/kit/kernel/py",
+    "/home/jun/miniconda3/envs/env_isaacsim/lib/python311.zip",
+    "/home/jun/mycode_py/isaaclab/inverted_pendulum"
+]
+
 # This is required as the CI pre-commit does not download the module (i.e. numpy, torch, prettytable)
 # Therefore, we have to ignore missing imports
 reportMissingImports = "none"
