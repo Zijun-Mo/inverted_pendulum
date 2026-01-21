@@ -134,3 +134,7 @@ pre-commit run --all-files
 "<path-to-isaac-sim>/extscache/omni.services.*"     // Services 工具
 ...
 ```
+### 日志曲线
+```bash
+    tensorboard --logdir logs
+```

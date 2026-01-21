@@ -139,7 +139,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     if args_cli.ml_framework.startswith("jax"):
         skrl.config.jax.backend = "jax" if args_cli.ml_framework == "jax" else "numpy"
 
-        # randomly sample a seed if seed = -1
+    # randomly sample a seed if seed = -1
     if args_cli.seed == -1:
         args_cli.seed = random.randint(0, 10000)
 
@@ -169,7 +169,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
-    # create isaac environment
+    # override number of environments to 1
+    env_cfg.scene.num_envs = 1
+    # set specific command ranges for play
+    # Ensure commands are fixed to initial values 0, 0, 0.17
+    if hasattr(env_cfg.commands, "base_commands"):
+        # Set ranges to exact value
+        env_cfg.commands.base_commands.lin_vel_x_range = (0.0, 0.0)
+        env_cfg.commands.base_commands.ang_vel_range = (0.0, 0.0)
+        env_cfg.commands.base_commands.leg_length_range = (0.17, 0.17)
+        # Disable resampling
+        env_cfg.commands.base_commands.resampling_time_range = (1.0e9, 1.0e9)
+
+    # Disable all automatic terminations for manual play
+    if hasattr(env_cfg.terminations, "time_out"):
+        env_cfg.terminations.time_out = None
+    if hasattr(env_cfg.terminations, "illegal_contact"):
+        env_cfg.terminations.illegal_contact = None
+    if hasattr(env_cfg.terminations, "max_ang_vel_z"):
+        env_cfg.terminations.max_ang_vel_z = None
+    
+    # Disable root reset so the robot doesn't snap back to origin if a reset somehow occurs
+    if hasattr(env_cfg.events, "reset_root"):
+        env_cfg.events.reset_root = None
+
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
     # convert to single-agent instance if required by the RL algorithm

@@ -11,7 +11,7 @@ import torch
 
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.utils.math import wrap_to_pi
+from isaaclab.utils.math import wrap_to_pi, quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -177,3 +177,134 @@ def root_height_below_threshold(env: ManagerBasedRLEnv, min_height: float, asset
     
     # Check Z height
     return root_pos[:, 2] < min_height
+
+
+def root_ang_vel_z_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Penalize angular velocity Z (yaw rate) L2 norm."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.square(asset.data.root_ang_vel_b[:, 2])
+
+
+def base_gravity_projection_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Penalize the magnitude of the gravity vector projected onto the base XY plane."""
+    # extract the used quantities
+    asset: Articulation = env.scene[asset_cfg.name]
+    
+    # get root orientation quaternion (N, 4) -> (w, x, y, z)
+    root_quat = asset.data.root_quat_w
+    
+    # world gravity vector (assumed to be [0, 0, -1])
+    gravity_vec_w = torch.tensor([0.0, 0.0, -1.0], device=asset.device).repeat(root_quat.shape[0], 1)
+    
+    # project gravity into base frame
+    gravity_b = quat_apply_inverse(root_quat, gravity_vec_w)
+    
+    # compute squared magnitude of the projection onto the XY plane
+    # Ideally, if upright, gravity_b should be [0, 0, -1], so X and Y are 0.
+    penalty = torch.sum(torch.square(gravity_b[:, :2]), dim=1)
+    
+    return penalty
+
+
+def root_ang_vel_z_out_of_bounds(env: ManagerBasedRLEnv, max_ang_vel_z: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Terminate when the root angular velocity Z exceeds the limit."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.abs(asset.data.root_ang_vel_b[:, 2]) > max_ang_vel_z
+
+
+def track_lin_vel_x_exp(
+    env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Reward tracking of linear velocity commands (x-axis) using exponential kernel."""
+    # extract the used quantities (to enable type-hinting)
+    asset: Articulation = env.scene[asset_cfg.name]
+    # compute the error
+    # asset.data.root_lin_vel_b implies velocity in Base Frame (Body Frame).
+    # This checks the forward velocity relative to the robot itself, not world X.
+    lin_vel_error = torch.square(env.command_manager.get_command(command_name)[:, 0] - asset.data.root_lin_vel_b[:, 0])
+    # 控制频率输出目标线速度和实际线速度
+    if env.common_step_counter % 30 == 0:  # 每秒打印
+        print(f"Target Lin Vel X: {env.command_manager.get_command(command_name)[:, 0][0].item():.4f}, Actual Lin Vel X: {asset.data.root_lin_vel_b[:, 0][0].item():.4f}")
+        print(f"exp(-error/std^2): {torch.exp(-lin_vel_error / std**2)[0].item():.4f}")
+    return torch.exp(-lin_vel_error / std**2)
+
+
+def track_ang_vel_z_exp(
+    env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Reward tracking of angular velocity commands (yaw) using exponential kernel."""
+    # extract the used quantities (to enable type-hinting)
+    asset: Articulation = env.scene[asset_cfg.name]
+    # compute the error
+    # angular velocity is in base frame
+    ang_vel_error = torch.square(env.command_manager.get_command(command_name)[:, 1] - asset.data.root_ang_vel_b[:, 2])
+
+    # 控制频率输出目标角速度和实际角速度
+    if env.common_step_counter % 30 == 0:  # 每秒打印
+        print(f"Target Ang Vel Z: {env.command_manager.get_command(command_name)[:, 1][0].item():.4f}, Actual Ang Vel Z: {asset.data.root_ang_vel_b[:, 2][0].item():.4f}")
+        print(f"exp(-error/std^2): {torch.exp(-ang_vel_error / std**2)[0].item():.4f}")
+    return torch.exp(-ang_vel_error / std**2)
+
+
+def track_leg_length_exp(
+    env: ManagerBasedRLEnv, 
+    std: float, 
+    command_name: str, 
+    asset_cfg: SceneEntityCfg,
+    wheel_body_names: list[str],
+    front_body_names: list[str],
+) -> torch.Tensor:
+    """Reward tracking of leg length commands using exponential kernel."""
+    # extract the used quantities (to enable type-hinting)
+    asset: Articulation = env.scene[asset_cfg.name]
+    
+    # 获取 body indices
+    wheel_indices, _ = asset.find_bodies(wheel_body_names)
+    front_indices, _ = asset.find_bodies(front_body_names)
+    
+    # 确保索引数量一致，通常是左右两条腿
+    if len(wheel_indices) != len(front_indices):
+         raise ValueError(f"Number of wheel bodies ({len(wheel_indices)}) and front bodies ({len(front_indices)}) must match.")
+    
+    # 获取 body 位置 (全局坐标) (num_envs, num_bodies, 3)
+    wheel_pos_w = asset.data.body_pos_w[:, wheel_indices, :]
+    front_pos_w = asset.data.body_pos_w[:, front_indices, :]
+    
+    # 获取 base 位置和姿态
+    root_pos_w = asset.data.root_pos_w
+    root_quat_w = asset.data.root_quat_w
+    
+    # 扩展 root 维度以匹配 body (num_envs, num_legs, 3/4)
+    # 这里我们需要分别计算每条腿的长度
+    num_legs = len(wheel_indices)
+    
+    # 计算相对位置
+    diff_w = wheel_pos_w - front_pos_w
+    
+    # 转换到 base 坐标系
+    # 由于 diff_w 是 (env, legs, 3), root_quat 是 (env, 4)
+    # 我们先 reshape
+    diff_w_flat = diff_w.view(-1, 3)
+    root_quat_expanded = root_quat_w.unsqueeze(1).repeat(1, num_legs, 1).view(-1, 4)
+    
+    diff_b_flat = quat_apply_inverse(root_quat_expanded, diff_w_flat)
+    diff_b = diff_b_flat.view(env.num_envs, num_legs, 3)
+    
+    # 计算 XZ 平面投影距离 (x, z) -> indices 0, 2
+    # leg_length = sqrt(dx^2 + dz^2)
+    current_leg_lengths = torch.norm(diff_b[:, :, [0, 2]], dim=-1) # (num_envs, num_legs)
+    
+    # 获取目标腿长 (num_envs,)
+    target_leg_length = env.command_manager.get_command(command_name)[:, 2]
+    
+    # 计算误差 (平均每条腿的误差)
+    # 扩展 target 以匹配 legs
+    target_expanded = target_leg_length.unsqueeze(1).repeat(1, num_legs)
+    
+    error = torch.mean(torch.square(current_leg_lengths - target_expanded), dim=1)
+    # 控制频率输出目标腿长和实际腿长
+    if env.common_step_counter % 30 == 0:  # 每秒打印
+        print(f"Target Leg Length: {target_leg_length[0].item():.4f}, Actual Leg Lengths: {current_leg_lengths[0].tolist()}")
+        print(f"exp(-error/std^2): {torch.exp(-error / std**2)[0].item():.4f}")
+    
+    return torch.exp(-error / std**2)

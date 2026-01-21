@@ -8,7 +8,7 @@ import math
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
-from isaaclab.sensors import ImuCfg
+from isaaclab.sensors import ContactSensorCfg, ImuCfg
 from isaaclab.utils.noise import AdditiveGaussianNoiseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -65,17 +65,30 @@ class InvertedPendulumSceneCfg(InteractiveSceneCfg):
             joint_pos={".*": 0.0}, 
         ),
         actuators={
-            # 定义关节驱动器
-            "joints": ImplicitActuatorCfg(
-                # 匹配所有前、后关节和轮子
-                joint_names_expr=[".*_front_joint", ".*_rear_joint", ".*_Wheel_joint"], 
-                effort_limit=400.0,
-                velocity_limit=100.0,
-                stiffness=0.0,
-                damping=2.0,
+            # 髋关节使用PD位置控制
+            "hips": ImplicitActuatorCfg(
+                joint_names_expr=[".*_front_joint", ".*_rear_joint"],
+                effort_limit_sim=25.0,
+                velocity_limit_sim=100.0,
+                stiffness=30.0,
+                damping=0.8,
             ),
-            # 如果腿部关节(Closure/Front/Rear)是被动的或弹簧阻尼的，
-            # 不需要在这里添加 implicit actuator，或者添加一个只有刚度阻尼的被动 actuator
+            # 轮子使用速度控制
+            "wheels": ImplicitActuatorCfg(
+                joint_names_expr=[".*_Wheel_joint"],
+                effort_limit_sim=6.0,
+                velocity_limit_sim=100.0,
+                stiffness=0.0,
+                damping=1.0,
+            ),
+            # 被动关节（闭链关节），不施加力矩，仅有由于摩擦产生的阻尼
+            "passive": ImplicitActuatorCfg(
+                joint_names_expr=[".*_child.*", ".*_joint3_joint"],
+                effort_limit_sim=0.0,
+                velocity_limit_sim=100.0,
+                stiffness=0.0,
+                damping=0.1, # Small damping for stability
+            ),
         },
     )
 
@@ -90,6 +103,13 @@ class InvertedPendulumSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
     )
 
+    # Contact sensor
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base_link",
+        history_length=3,
+        track_air_time=False,
+    )
+
 
 ##
 # MDP settings
@@ -100,19 +120,44 @@ class InvertedPendulumSceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """Action specifications for the MDP."""
 
-    joint_effort = mdp.JointEffortActionCfg(
-        asset_name="robot", 
-        # 匹配四个髋关节
-        joint_names=[".*_front_joint", ".*_rear_joint"], 
-        scale=50.0
+    # 髋关节位置控制
+    joint_pos = mdp.JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=[".*_front_joint", ".*_rear_joint"],
+        scale=0.5,
+        use_default_offset=True,
+        clip={".*": (-0.5, 0.5)},
     )
 
-    joint_effort = mdp.JointEffortActionCfg(
-        asset_name="robot", 
-        # 匹配两个轮关节
-        joint_names=[".*_Wheel_joint"], 
-        scale=20.0
+    # 轮子速度控制
+    joint_vel = mdp.JointVelocityActionCfg(
+        asset_name="robot",
+        joint_names=[".*_Wheel_joint"],
+        scale=10.0,
+        use_default_offset=True,
     )
+
+
+@configclass
+class CommandsCfg:
+    """Command specifications for the MDP."""
+
+    base_commands = mdp.InvertedPendulumCommandCfg(
+        class_type=mdp.InvertedPendulumCommand,
+        resampling_time_range=(2.0, 3.0),
+        lin_vel_x_range=(-2.0, 2.0),
+        ang_vel_range=(-16.0, 16.0),
+        leg_length_range=(0.14, 0.24),
+        debug_vis=True,
+        # Curriculum settings
+        curriculum_lin_vel_step=0.005,
+        curriculum_ang_vel_step=0.005,
+        curriculum_lin_vel_min_range=0.3,
+        curriculum_ang_vel_min_range=0.03,
+        lin_vel_err_threshold=0.35,
+        ang_vel_err_threshold=0.5,
+    )
+
 
 @configclass
 class ObservationsCfg:
@@ -123,8 +168,17 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         # observation terms (order preserved)
+        commands = ObsTerm(
+            func=mdp.generated_commands,
+            params={"command_name": "base_commands"},
+        )
         imu_quat = ObsTerm(
             func=mdp.imu_orientation,
+            params={"sensor_cfg": SceneEntityCfg("imu")},
+            noise=AdditiveGaussianNoiseCfg(mean=0.0, std=0.05),
+        )
+        imu_ang_vel = ObsTerm(
+            func=mdp.imu_angular_velocity,
             params={"sensor_cfg": SceneEntityCfg("imu")},
             noise=AdditiveGaussianNoiseCfg(mean=0.0, std=0.05),
         )
@@ -194,69 +248,63 @@ class RewardsCfg:
     # (2) Failure penalty
     terminating = RewTerm(func=mdp.is_terminated, weight=-2.0) # type: ignore
 
-    # (3) Base XY Position Penalty (Distance from origin)
-    base_xy_pos = RewTerm(
-        func=mdp.base_xy_dist_penalty,
-        weight=-0.1, # 负权重表示惩罚 (距离越大，奖励越低)
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "target_pos": (0.0, 0.0),
-        },
-    )
-
-    # (3.5) Base Height Penalty (Target 0.3m)
-    base_height = RewTerm(
-        func=mdp.base_height_penalty,
-        weight=-1.0,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "target_height": 0.3,
-        },
-    )
-
-    # (4) Base Orientation Penalties (Roll, Pitch, Yaw separate)
-    base_orientation_roll = RewTerm(
-        func=mdp.base_orientation_roll_penalty,
-        weight=-0.1,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-    base_orientation_pitch = RewTerm(
-        func=mdp.base_orientation_pitch_penalty,
+    # (3) Base Orientation Penalties (Gravity Projection)
+    # Penalize the projection of gravity onto the base XY plane to encourage upright posture.
+    flat_orientation_l2 = RewTerm(
+        func=mdp.base_gravity_projection_penalty,
         weight=-1.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
-    base_orientation_yaw = RewTerm(
-        func=mdp.base_orientation_yaw_penalty,
-        weight=-0.1,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
 
-    # (5) Joint position target penalty (for front and rear joints)
-    joint_pos_penalty = RewTerm(
-        func=mdp.joint_pos_target_l2,
-        weight=-0.1,
-        params={
-            "target": 0.0,
-            "asset_cfg": SceneEntityCfg(
-                "robot", joint_names=[".*_front_joint", ".*_rear_joint"] # 只针对前后关节
-            ),
-        },
-    )
-
-    # (6) Joint velocity penalty
+    # (4) Joint velocity penalty
     joint_vel_penalty = RewTerm(
         func=mdp.joint_vel_l1,
-        weight=-0.005,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*"])}, # 匹配所有关节
+        weight=-0.0005,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_front_joint", ".*_rear_joint"])}, # 匹配髋关节
     )
 
-    # (7) Wheels Off Ground Penalty
+    # (5) Wheels Off Ground Penalty
     wheels_off_ground = RewTerm(
         func=mdp.wheels_off_ground_penalty,
         weight=-1.0, # 惩罚轮子抬起
         params={
             # 使用 body_names 匹配 USD 中的 Rigid Body 名称
             "asset_cfg": SceneEntityCfg("robot", body_names=[".*_Wheel_link"]), 
+        },
+    )
+
+    # (6) Linear Velocity Tracking
+    track_lin_vel_x = RewTerm(
+        func=mdp.track_lin_vel_x_exp,
+        weight=5.0,
+        params={
+            "command_name": "base_commands",
+            "std": 0.5,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    # (7) Angular Velocity Tracking
+    track_ang_vel_z = RewTerm(
+        func=mdp.track_ang_vel_z_exp,
+        weight=5.0,
+        params={
+            "command_name": "base_commands",
+            "std": 1.0, # Increased from 0.5 to 1.0 to widen the reward basin
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    # (9) Leg Length Tracking
+    track_leg_length = RewTerm(
+        func=mdp.track_leg_length_exp,
+        weight=1.0,
+        params={
+            "command_name": "base_commands",
+            "std": 0.05,
+            "asset_cfg": SceneEntityCfg("robot"),
+            "wheel_body_names": [".*_Wheel_link"], # 匹配 Left_Wheel_link, Right_Wheel_link
+            "front_body_names": [".*_front_link"], # 匹配 Left_front_link, Right_front_link
         },
     )
 
@@ -267,31 +315,17 @@ class TerminationsCfg:
 
     # (1) Time out
     time_out = DoneTerm(func=mdp.time_out, time_out=True) # type: ignore
-    # (2) Cart out of bounds
-    root_out_of_bounds = DoneTerm(
-        func=mdp.root_pos_out_of_bounds,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "bounds": 1.5,
-        },
-    )
 
-    # (3) Pitch out of bounds (9 degrees = ~0.157 rad)
-    pitch_limit = DoneTerm(
-        func=mdp.base_pitch_out_of_bounds,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "max_pitch": 0.157,
-        },
+    # (2) Illegal Contact (Body touching ground)
+    illegal_contact = DoneTerm(
+        func=mdp.illegal_contact,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base_link"), "threshold": 1.0},
     )
-
-    # (4) Height too low (Fall down)
-    low_height = DoneTerm(
-        func=mdp.root_height_below_threshold,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "min_height": 0.25,
-        },
+    
+    # (3) Excessive Angular Velocity (Spinning out of control)
+    max_ang_vel_z = DoneTerm(
+        func=mdp.root_ang_vel_z_out_of_bounds,
+        params={"asset_cfg": SceneEntityCfg("robot"), "max_ang_vel_z": 25.0},
     )
 
 
@@ -309,6 +343,7 @@ class InvertedPendulumEnvCfg(ManagerBasedRLEnvCfg):
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
     events: EventCfg = EventCfg()
     # MDP settings
     rewards: RewardsCfg = RewardsCfg()
@@ -319,7 +354,7 @@ class InvertedPendulumEnvCfg(ManagerBasedRLEnvCfg):
         """Post initialization."""
         # general settings
         self.decimation = 2
-        self.episode_length_s = 5
+        self.episode_length_s = 10
         # viewer settings
         self.viewer.eye = (8.0, 0.0, 5.0)
         # simulation settings

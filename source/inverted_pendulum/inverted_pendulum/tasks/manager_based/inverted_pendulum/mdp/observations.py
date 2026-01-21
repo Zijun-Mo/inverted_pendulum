@@ -23,6 +23,13 @@ def imu_orientation(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch
     # return the orientation in world frame (w, x, y, z)
     return sensor.data.quat_w
 
+def imu_angular_velocity(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Observation of the IMU angular velocity (3D vector)."""
+    # extract the sensor
+    sensor: Imu = env.scene[sensor_cfg.name]
+    # return the angular velocity in sensor frame (x, y, z)
+    return sensor.data.ang_vel_b
+
 def wheel_odometry(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, wheel_radius: float) -> torch.Tensor:
     """Observation of wheel odometry (linear displacement) based on joint positions.
     
