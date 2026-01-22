@@ -12,6 +12,7 @@ import torch
 from isaaclab.sensors import Imu
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.assets import Articulation
+from isaaclab.utils.math import quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -48,3 +49,50 @@ def wheel_odometry(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, wheel_radi
     
     # convert to linear distance: pos * radius
     return wheel_pos * wheel_radius
+
+
+def base_gravity_projection(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Observation of gravity projected到机体坐标系的XY分量，用于姿态感知。"""
+    asset: Articulation = env.scene[asset_cfg.name]
+    root_quat = asset.data.root_quat_w
+    gravity_vec_w = torch.tensor([0.0, 0.0, -1.0], device=asset.device).repeat(root_quat.shape[0], 1)
+    gravity_b = quat_apply_inverse(root_quat, gravity_vec_w)
+    return gravity_b[:, :2]
+
+
+def base_lin_vel_body(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Base 线速度（体坐标）。"""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.root_lin_vel_b
+
+
+def action_history(env: ManagerBasedRLEnv, history_length: int) -> torch.Tensor:
+    """动作历史堆叠（长度=history_length），使用 ActionManager 的当前/上一步动作。"""
+    # 使用环境上的缓存，避免每步重新分配
+    action_manager = env.action_manager
+    action_dim = action_manager.total_action_dim
+    device = env.device if hasattr(env, "device") else action_manager.action.device
+
+    if not hasattr(env, "_action_history_buf") or env._action_history_buf.shape[1] != history_length:
+        env._action_history_buf = torch.zeros(env.num_envs, history_length, action_dim, device=device)
+
+    buf = env._action_history_buf
+    current_action = action_manager.action
+
+    # 滚动历史并写入最新动作
+    buf = torch.roll(buf, shifts=1, dims=1)
+    buf[:, 0, :] = current_action
+    env._action_history_buf = buf
+
+    return buf.reshape(env.num_envs, history_length * action_dim)
+
+
+def reset_action_history(env: ManagerBasedRLEnv, env_ids) -> dict:
+    """在 reset 时清零动作历史缓存。"""
+    if not hasattr(env, "_action_history_buf"):
+        return {}
+    if env_ids is None or (isinstance(env_ids, slice) and env_ids == slice(None)):
+        env._action_history_buf.zero_()
+    else:
+        env._action_history_buf[env_ids] = 0.0
+    return {}

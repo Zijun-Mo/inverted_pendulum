@@ -153,8 +153,8 @@ def wheels_off_ground_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg)
     # Assuming ground is at Z=0.
     wheel_heights = body_pos[..., 2]
     
-    # Sum penalty for all matching wheels (left and right)
-    return torch.sum(wheel_heights, dim=1)
+    # L2 penalty on wheel heights; encourages all wheels to stay near ground (z≈0)
+    return torch.sum(torch.square(wheel_heights), dim=1)
 
 
 def base_pitch_out_of_bounds(env: ManagerBasedRLEnv, max_pitch: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -223,9 +223,9 @@ def track_lin_vel_x_exp(
     # This checks the forward velocity relative to the robot itself, not world X.
     lin_vel_error = torch.square(env.command_manager.get_command(command_name)[:, 0] - asset.data.root_lin_vel_b[:, 0])
     # 控制频率输出目标线速度和实际线速度
-    if env.common_step_counter % 30 == 0:  # 每秒打印
-        print(f"Target Lin Vel X: {env.command_manager.get_command(command_name)[:, 0][0].item():.4f}, Actual Lin Vel X: {asset.data.root_lin_vel_b[:, 0][0].item():.4f}")
-        print(f"exp(-error/std^2): {torch.exp(-lin_vel_error / std**2)[0].item():.4f}")
+    # if env.common_step_counter % 30 == 0:  # 每秒打印
+    #     print(f"Target Lin Vel X: {env.command_manager.get_command(command_name)[:, 0][0].item():.4f}, Actual Lin Vel X: {asset.data.root_lin_vel_b[:, 0][0].item():.4f}")
+    #     print(f"exp(-error/std^2): {torch.exp(-lin_vel_error / std**2)[0].item():.4f}")
     return torch.exp(-lin_vel_error / std**2)
 
 
@@ -240,9 +240,9 @@ def track_ang_vel_z_exp(
     ang_vel_error = torch.square(env.command_manager.get_command(command_name)[:, 1] - asset.data.root_ang_vel_b[:, 2])
 
     # 控制频率输出目标角速度和实际角速度
-    if env.common_step_counter % 30 == 0:  # 每秒打印
-        print(f"Target Ang Vel Z: {env.command_manager.get_command(command_name)[:, 1][0].item():.4f}, Actual Ang Vel Z: {asset.data.root_ang_vel_b[:, 2][0].item():.4f}")
-        print(f"exp(-error/std^2): {torch.exp(-ang_vel_error / std**2)[0].item():.4f}")
+    # if env.common_step_counter % 30 == 0:  # 每秒打印
+    #     print(f"Target Ang Vel Z: {env.command_manager.get_command(command_name)[:, 1][0].item():.4f}, Actual Ang Vel Z: {asset.data.root_ang_vel_b[:, 2][0].item():.4f}")
+    #     print(f"exp(-error/std^2): {torch.exp(-ang_vel_error / std**2)[0].item():.4f}")
     return torch.exp(-ang_vel_error / std**2)
 
 
@@ -303,8 +303,54 @@ def track_leg_length_exp(
     
     error = torch.mean(torch.square(current_leg_lengths - target_expanded), dim=1)
     # 控制频率输出目标腿长和实际腿长
-    if env.common_step_counter % 30 == 0:  # 每秒打印
-        print(f"Target Leg Length: {target_leg_length[0].item():.4f}, Actual Leg Lengths: {current_leg_lengths[0].tolist()}")
-        print(f"exp(-error/std^2): {torch.exp(-error / std**2)[0].item():.4f}")
+    # if env.common_step_counter % 30 == 0:  # 每秒打印
+    #     print(f"Target Leg Length: {target_leg_length[0].item():.4f}, Actual Leg Lengths: {current_leg_lengths[0].tolist()}")
+    #     print(f"exp(-error/std^2): {torch.exp(-error / std**2)[0].item():.4f}")
     
     return torch.exp(-error / std**2)
+
+
+def similar_hip(
+    env: ManagerBasedRLEnv,
+    sigma: float,
+    asset_cfg: SceneEntityCfg,
+    left_joint_names: list[str],
+    right_joint_names: list[str],
+    include_velocity: bool = True,
+) -> torch.Tensor:
+    """对称性奖励：左右髋关节姿态（可选速度）越接近越高。
+
+    Args:
+        sigma: 指数核标准差，越小越强调对称。
+        left_joint_names/right_joint_names: 左右对应关节名列表，长度必须一致。
+        include_velocity: 是否同时约束关节速度。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    left_ids, _ = asset.find_joints(left_joint_names)
+    right_ids, _ = asset.find_joints(right_joint_names)
+
+    if len(left_ids) != len(right_ids):
+        raise ValueError(
+            f"Left/right hip count mismatch: {len(left_ids)} vs {len(right_ids)}"
+        )
+
+    pos_l = asset.data.joint_pos[:, left_ids]
+    pos_r = asset.data.joint_pos[:, right_ids]
+    diffs = torch.square(pos_l - pos_r)
+
+    if include_velocity:
+        vel_l = asset.data.joint_vel[:, left_ids]
+        vel_r = asset.data.joint_vel[:, right_ids]
+        diffs = diffs + torch.square(vel_l - vel_r)
+
+    # 取平均后用高斯核
+    mean_diff = torch.mean(diffs, dim=1)
+    return torch.exp(-mean_diff / (sigma * sigma))
+
+
+def action_rate_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """动作变化率惩罚，使用 ActionManager 的当前/前一动作。"""
+    am = env.action_manager
+    diff = am.action - am.prev_action
+    return torch.sum(torch.square(diff), dim=1)
